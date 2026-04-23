@@ -680,8 +680,7 @@ def create_app() -> FastAPI:
     if config.images_dir.exists():
         app.mount("/images", StaticFiles(directory=str(config.images_dir)), name="images")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_web(full_path: str):
+    def build_web_response(full_path: str) -> FileResponse:
         asset = resolve_web_asset(full_path)
         if asset is not None:
             return FileResponse(asset)
@@ -694,5 +693,13 @@ def create_app() -> FastAPI:
         if fallback is None:
             raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(fallback)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_web(full_path: str):
+        return build_web_response(full_path)
+
+    @app.head("/{full_path:path}", include_in_schema=False)
+    async def serve_web_head(full_path: str):
+        return build_web_response(full_path)
 
     return app
