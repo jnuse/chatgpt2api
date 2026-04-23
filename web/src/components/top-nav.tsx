@@ -34,6 +34,7 @@ export function TopNav() {
         <div className="flex flex-1 items-center gap-3">
           <Link
             href="/image"
+            prefetch={false}
             className="py-2 text-[15px] font-semibold tracking-tight text-stone-950 transition hover:text-stone-700"
           >
             chatgpt2api
@@ -56,6 +57,7 @@ export function TopNav() {
               <Link
                 key={item.href}
                 href={item.href}
+                prefetch={false}
                 className={cn(
                   "relative py-2 text-[15px] font-medium transition",
                   active ? "font-semibold text-stone-950" : "text-stone-500 hover:text-stone-900",

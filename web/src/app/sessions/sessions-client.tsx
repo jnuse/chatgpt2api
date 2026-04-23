@@ -140,8 +140,9 @@ export function SessionsClient({ initialAccountId }: SessionsClientProps) {
   }, []);
 
   useEffect(() => {
-    const resolvedAccountId = accounts.some((account) => account.id === initialAccountId)
-      ? initialAccountId
+    const resolvedFromQuery = String(initialAccountId || "").trim();
+    const resolvedAccountId = accounts.some((account) => account.id === resolvedFromQuery)
+      ? resolvedFromQuery
       : accounts[0]?.id ?? "";
 
     if (!resolvedAccountId) {
@@ -153,10 +154,14 @@ export function SessionsClient({ initialAccountId }: SessionsClientProps) {
       setPage(1);
     }
 
-    if (initialAccountId !== resolvedAccountId) {
+    if (resolvedFromQuery !== resolvedAccountId) {
       router.replace(`/sessions?accountId=${resolvedAccountId}`);
     }
-  }, [accounts, initialAccountId, router, selectedAccountId]);
+  }, [accounts, initialAccountId, router]);
+
+  useEffect(() => {
+    setSelectedSessionIds(new Set());
+  }, [selectedAccountId]);
 
   useEffect(() => {
     if (!selectedAccountId) {
