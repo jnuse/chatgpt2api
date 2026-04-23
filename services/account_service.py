@@ -205,6 +205,9 @@ class AccountService:
             headers["oai-session-id"] = session_id
         return headers, impersonate
 
+    def build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
+        return self._build_remote_headers(access_token)
+
     def _public_items(self, accounts: list[dict]) -> list[dict]:
         return [
             {

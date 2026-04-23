@@ -13,11 +13,13 @@ import {
   Download,
   LoaderCircle,
   Pencil,
+  MessageSquareText,
   RefreshCw,
   Search,
   Trash2,
   UserRound,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -180,6 +182,7 @@ function normalizeAccounts(items: Account[]): Account[] {
 }
 
 export default function AccountsPage() {
+  const router = useRouter();
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -738,6 +741,14 @@ export default function AccountsPage() {
                               disabled={isRefreshing}
                             >
                               <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                              onClick={() => router.push(`/sessions?accountId=${account.id}`)}
+                              title="管理会话"
+                            >
+                              <MessageSquareText className="size-4" />
                             </button>
                             <button
                               type="button"

@@ -17,3 +17,6 @@ test
 docker-compose-local.yml
 
 .claude/settings.local.json
+
+api.txt
+fetch.txt

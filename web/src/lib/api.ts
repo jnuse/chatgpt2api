@@ -111,6 +111,47 @@ export async function updateAccount(
   });
 }
 
+export type RemoteSession = {
+  id: string;
+  title: string;
+  create_time: string;
+  update_time: string;
+  pinned_time?: string | null;
+  is_archived: boolean;
+  is_starred?: boolean | null;
+  is_temporary_chat: boolean;
+  is_do_not_remember: boolean;
+  memory_scope?: string | null;
+  snippet?: string | null;
+  gizmo_id?: string | null;
+};
+
+export type RemoteSessionListResponse = {
+  items: RemoteSession[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export async function fetchAccountSessions(
+  accountId: string,
+  options: { offset?: number; limit?: number } = {},
+) {
+  const params = new URLSearchParams();
+  params.set("offset", String(Math.max(0, options.offset ?? 0)));
+  params.set("limit", String(Math.min(100, Math.max(1, options.limit ?? 28))));
+  return httpRequest<RemoteSessionListResponse>(`/api/accounts/${accountId}/sessions?${params.toString()}`);
+}
+
+export async function deleteAccountSession(accountId: string, sessionId: string) {
+  return httpRequest<{ success: boolean; message?: string | null }>(
+    `/api/accounts/${accountId}/sessions/${sessionId}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export async function generateImage(prompt: string, model?: ImageModel) {
   return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
     "/v1/images/generations",
