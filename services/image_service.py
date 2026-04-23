@@ -615,6 +615,22 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
     )
     if not response.ok:
         return ""
+
+
+    def _delete_conversation(session: Session, conversation_id: str) -> bool:
+        normalized_id = str(conversation_id or "").strip()
+        if not normalized_id:
+            return False
+        response = session.patch(
+            f"{BASE_URL}/backend-api/conversation/{normalized_id}",
+            json={"is_visible": False},
+            headers={
+                "x-openai-target-path": f"/backend-api/conversation/{normalized_id}",
+                "x-openai-target-route": "/backend-api/conversation/{conversation_id}",
+            },
+            timeout=20,
+        )
+        return response.status_code == 200
     return str((response.json() or {}).get("download_url") or "")
 
 
@@ -658,7 +674,14 @@ def _resolve_upstream_model(access_token: str, requested_model: str) -> str:
     return str(requested_model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 
-def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_MODEL, response_format: str = "b64_json", base_url: str = None) -> dict:
+def generate_image_result(
+    access_token: str,
+    prompt: str,
+    model: str = DEFAULT_MODEL,
+    response_format: str = "b64_json",
+    base_url: str = None,
+    auto_delete_remote_session: bool = False,
+) -> dict:
     prompt = str(prompt or "").strip()
     access_token = str(access_token or "").strip()
     if not prompt:
@@ -716,6 +739,18 @@ def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_M
             result_data = {"b64_json": _download_as_base64(session, download_url), "revised_prompt": prompt}
 
         print(f"[image-upstream] success token={access_token[:12]}... images=1 format={response_format}")
+        if auto_delete_remote_session and actual_conversation_id:
+            try:
+                deleted = _delete_conversation(session, actual_conversation_id)
+                print(
+                    f"[image-upstream] auto-delete conversation={actual_conversation_id} "
+                    f"success={deleted}"
+                )
+            except Exception as exc:
+                print(
+                    f"[image-upstream] auto-delete fail conversation={actual_conversation_id} "
+                    f"error={exc}"
+                )
         return {
             "created": time.time_ns() // 1_000_000_000,
             "data": [result_data],
@@ -769,6 +804,7 @@ def edit_image_result(
     model: str = DEFAULT_MODEL,
     response_format: str = "b64_json",
     base_url: str = None,
+    auto_delete_remote_session: bool = False,
 ) -> dict:
     prompt = str(prompt or "").strip()
     access_token = str(access_token or "").strip()
@@ -854,6 +890,18 @@ def edit_image_result(
             result_data = {"b64_json": _download_as_base64(session, download_url), "revised_prompt": prompt}
 
         print(f"[image-edit-upstream] success token={access_token[:12]}... inputs={len(uploaded_images)} format={response_format}")
+        if auto_delete_remote_session and actual_conversation_id:
+            try:
+                deleted = _delete_conversation(session, actual_conversation_id)
+                print(
+                    f"[image-edit-upstream] auto-delete conversation={actual_conversation_id} "
+                    f"success={deleted}"
+                )
+            except Exception as exc:
+                print(
+                    f"[image-edit-upstream] auto-delete fail conversation={actual_conversation_id} "
+                    f"error={exc}"
+                )
         return {
             "created": time.time_ns() // 1_000_000_000,
             "data": [result_data],

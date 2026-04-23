@@ -11,6 +11,19 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 
 
+def _to_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
+
+
 @dataclass(frozen=True)
 class LoadedSettings:
     auth_key: str
@@ -103,6 +116,10 @@ class ConfigStore:
             or self.data.get("base_url")
             or ""
         ).strip().rstrip("/")
+
+    @property
+    def auto_delete_remote_session(self) -> bool:
+        return _to_bool(self.data.get("auto_delete_remote_session"), default=False)
 
     def get(self) -> dict[str, object]:
         return dict(self.data)

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 
@@ -21,6 +22,7 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
+  const setAutoDeleteRemoteSession = useSettingsStore((state) => state.setAutoDeleteRemoteSession);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -127,6 +129,20 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">用于生成图片结果的访问前缀地址。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <div className="flex items-start gap-3 rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+              <Checkbox
+                checked={Boolean(config?.auto_delete_remote_session)}
+                onCheckedChange={(checked) => setAutoDeleteRemoteSession(Boolean(checked))}
+              />
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-stone-700">每次调用后自动删除远程会话</label>
+                <p className="text-xs text-stone-500">
+                  开启后，图片生成/编辑成功后会自动删除对应 ChatGPT 远程会话，避免会话堆积。
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 

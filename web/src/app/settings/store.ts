@@ -21,6 +21,20 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+function toBoolean(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const text = String(value ?? "").trim().toLowerCase();
+  if (["1", "true", "yes", "on", "y"].includes(text)) {
+    return true;
+  }
+  if (["0", "false", "no", "off", "n"].includes(text)) {
+    return false;
+  }
+  return false;
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   return {
     ...config,
@@ -28,6 +42,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
+    auto_delete_remote_session: toBoolean(config.auto_delete_remote_session),
   };
 }
 
@@ -82,6 +97,7 @@ type SettingsStore = {
   setRefreshAccountIntervalMinute: (value: string) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
+  setAutoDeleteRemoteSession: (checked: boolean) => void;
 
   loadPools: (silent?: boolean) => Promise<void>;
   openAddDialog: () => void;
@@ -163,6 +179,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
+        auto_delete_remote_session: Boolean(config.auto_delete_remote_session),
       });
       set({
         config: normalizeConfig(data.config),
@@ -226,6 +243,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: {
           ...state.config,
           base_url: value,
+        },
+      };
+    });
+  },
+
+  setAutoDeleteRemoteSession: (checked) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          auto_delete_remote_session: checked,
         },
       };
     });

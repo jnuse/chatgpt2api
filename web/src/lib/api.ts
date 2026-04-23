@@ -54,6 +54,7 @@ export type SettingsConfig = {
   base_url?: string;
   "auth-key"?: string;
   refresh_account_interval_minute?: number | string;
+  auto_delete_remote_session?: boolean;
   [key: string]: unknown;
 };
 

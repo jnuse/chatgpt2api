@@ -2,5 +2,6 @@
   "auth-key": "chatgpt2api",
   "refresh_account_interval_minute": 60,
   "proxy": "",
-  "base_url": ""
+  "base_url": "",
+  "auto_delete_remote_session": false
 }
