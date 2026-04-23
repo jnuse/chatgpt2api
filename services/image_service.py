@@ -706,6 +706,7 @@ def generate_image_result(
         raise ImageGenerationError("token is required")
 
     session, fp = _new_session(access_token)
+    actual_conversation_id = ""
     try:
         upstream_model = _resolve_upstream_model(access_token, model)
         print(
@@ -755,6 +756,14 @@ def generate_image_result(
             result_data = {"b64_json": _download_as_base64(session, download_url), "revised_prompt": prompt}
 
         print(f"[image-upstream] success token={access_token[:12]}... images=1 format={response_format}")
+        return {
+            "created": time.time_ns() // 1_000_000_000,
+            "data": [result_data],
+        }
+    except Exception as exc:
+        print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
+        raise
+    finally:
         if auto_delete_remote_session and actual_conversation_id:
             try:
                 deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
@@ -767,14 +776,6 @@ def generate_image_result(
                     f"[image-upstream] auto-delete fail conversation={actual_conversation_id} "
                     f"error={exc}"
                 )
-        return {
-            "created": time.time_ns() // 1_000_000_000,
-            "data": [result_data],
-        }
-    except Exception as exc:
-        print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
-        raise
-    finally:
         session.close()
 
 
@@ -832,6 +833,7 @@ def edit_image_result(
         raise ImageGenerationError("image is required")
 
     session, fp = _new_session(access_token)
+    actual_conversation_id = ""
     try:
         upstream_model = _resolve_upstream_model(access_token, model)
         print(
@@ -906,6 +908,14 @@ def edit_image_result(
             result_data = {"b64_json": _download_as_base64(session, download_url), "revised_prompt": prompt}
 
         print(f"[image-edit-upstream] success token={access_token[:12]}... inputs={len(uploaded_images)} format={response_format}")
+        return {
+            "created": time.time_ns() // 1_000_000_000,
+            "data": [result_data],
+        }
+    except Exception as exc:
+        print(f"[image-edit-upstream] fail token={access_token[:12]}... error={exc}")
+        raise
+    finally:
         if auto_delete_remote_session and actual_conversation_id:
             try:
                 deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
@@ -918,12 +928,4 @@ def edit_image_result(
                     f"[image-edit-upstream] auto-delete fail conversation={actual_conversation_id} "
                     f"error={exc}"
                 )
-        return {
-            "created": time.time_ns() // 1_000_000_000,
-            "data": [result_data],
-        }
-    except Exception as exc:
-        print(f"[image-edit-upstream] fail token={access_token[:12]}... error={exc}")
-        raise
-    finally:
         session.close()
