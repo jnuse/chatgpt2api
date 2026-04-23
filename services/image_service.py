@@ -618,7 +618,7 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
     return str((response.json() or {}).get("download_url") or "")
 
 
-def _delete_conversation(session: Session, conversation_id: str) -> bool:
+def _delete_conversation(session: Session, access_token: str, device_id: str, conversation_id: str) -> bool:
     normalized_id = str(conversation_id or "").strip()
     if not normalized_id:
         return False
@@ -626,12 +626,28 @@ def _delete_conversation(session: Session, conversation_id: str) -> bool:
         f"{BASE_URL}/backend-api/conversation/{normalized_id}",
         json={"is_visible": False},
         headers={
+            "Authorization": f"Bearer {access_token}",
+            "oai-device-id": device_id,
             "x-openai-target-path": f"/backend-api/conversation/{normalized_id}",
             "x-openai-target-route": f"/backend-api/conversation/{normalized_id}",
         },
         timeout=20,
     )
-    return response.status_code == 200
+    if response.status_code == 404:
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "conversation_deleted":
+            return True
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    return bool(payload.get("success")) if isinstance(payload, dict) else False
 
 
 def _download_as_base64(session: Session, download_url: str) -> str:
@@ -741,7 +757,7 @@ def generate_image_result(
         print(f"[image-upstream] success token={access_token[:12]}... images=1 format={response_format}")
         if auto_delete_remote_session and actual_conversation_id:
             try:
-                deleted = _delete_conversation(session, actual_conversation_id)
+                deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
                 print(
                     f"[image-upstream] auto-delete conversation={actual_conversation_id} "
                     f"success={deleted}"
@@ -892,7 +908,7 @@ def edit_image_result(
         print(f"[image-edit-upstream] success token={access_token[:12]}... inputs={len(uploaded_images)} format={response_format}")
         if auto_delete_remote_session and actual_conversation_id:
             try:
-                deleted = _delete_conversation(session, actual_conversation_id)
+                deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
                 print(
                     f"[image-edit-upstream] auto-delete conversation={actual_conversation_id} "
                     f"success={deleted}"
