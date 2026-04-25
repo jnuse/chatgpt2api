@@ -16,6 +16,7 @@ from services.account_service import account_service
 from services import proof_of_work
 from services.config import config
 from services.proxy_service import proxy_settings
+from services.remote_session_cleanup import cleanup_remote_session
 
 
 BASE_URL = "https://chatgpt.com"
@@ -618,38 +619,6 @@ def _fetch_download_url(session: Session, access_token: str, device_id: str, con
     return str((response.json() or {}).get("download_url") or "")
 
 
-def _delete_conversation(session: Session, access_token: str, device_id: str, conversation_id: str) -> bool:
-    normalized_id = str(conversation_id or "").strip()
-    if not normalized_id:
-        return False
-    response = session.patch(
-        f"{BASE_URL}/backend-api/conversation/{normalized_id}",
-        json={"is_visible": False},
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "oai-device-id": device_id,
-            "x-openai-target-path": f"/backend-api/conversation/{normalized_id}",
-            "x-openai-target-route": f"/backend-api/conversation/{normalized_id}",
-        },
-        timeout=20,
-    )
-    if response.status_code == 404:
-        try:
-            payload = response.json()
-        except Exception:
-            payload = None
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if isinstance(detail, dict) and detail.get("code") == "conversation_deleted":
-            return True
-    if response.status_code != 200:
-        return False
-    try:
-        payload = response.json()
-    except Exception:
-        payload = None
-    return bool(payload.get("success")) if isinstance(payload, dict) else False
-
-
 def _download_as_base64(session: Session, download_url: str) -> str:
     response = session.get(download_url, timeout=60)
     if not response.ok or not response.content:
@@ -764,18 +733,14 @@ def generate_image_result(
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
         raise
     finally:
-        if auto_delete_remote_session and actual_conversation_id:
-            try:
-                deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
-                print(
-                    f"[image-upstream] auto-delete conversation={actual_conversation_id} "
-                    f"success={deleted}"
-                )
-            except Exception as exc:
-                print(
-                    f"[image-upstream] auto-delete fail conversation={actual_conversation_id} "
-                    f"error={exc}"
-                )
+        cleanup_remote_session(
+            session,
+            access_token,
+            device_id,
+            actual_conversation_id,
+            enabled=auto_delete_remote_session,
+            log_prefix="image-upstream",
+        )
         session.close()
 
 
@@ -916,16 +881,12 @@ def edit_image_result(
         print(f"[image-edit-upstream] fail token={access_token[:12]}... error={exc}")
         raise
     finally:
-        if auto_delete_remote_session and actual_conversation_id:
-            try:
-                deleted = _delete_conversation(session, access_token, device_id, actual_conversation_id)
-                print(
-                    f"[image-edit-upstream] auto-delete conversation={actual_conversation_id} "
-                    f"success={deleted}"
-                )
-            except Exception as exc:
-                print(
-                    f"[image-edit-upstream] auto-delete fail conversation={actual_conversation_id} "
-                    f"error={exc}"
-                )
+        cleanup_remote_session(
+            session,
+            access_token,
+            device_id,
+            actual_conversation_id,
+            enabled=auto_delete_remote_session,
+            log_prefix="image-edit-upstream",
+        )
         session.close()
