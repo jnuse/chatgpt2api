@@ -129,8 +129,9 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
                     await run_in_threadpool(account_service.get_available_access_token)
                 except RuntimeError as exc:
                     raise_image_quota_error(exc)
+            stream, cleanup = chatgpt_service.stream_chat_completion_with_cleanup(payload)
             return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_chat_completion(payload)),
+                sse_json_stream(stream, cleanup=cleanup),
                 media_type="text/event-stream",
             )
         return await run_in_threadpool(chatgpt_service.create_chat_completion, payload)
@@ -140,8 +141,9 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
         require_identity(authorization)
         payload = body.model_dump(mode="python")
         if bool(payload.get("stream")):
+            stream, cleanup = chatgpt_service.stream_response_with_cleanup(payload)
             return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_response(payload)),
+                sse_json_stream(stream, cleanup=cleanup),
                 media_type="text/event-stream",
             )
         return await run_in_threadpool(chatgpt_service.create_response, payload)

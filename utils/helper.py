@@ -4,7 +4,7 @@ import hashlib
 import uuid
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator
 
 from curl_cffi import requests
 import re
@@ -58,19 +58,37 @@ def parse_sse_lines(response: requests.Response) -> Iterator[Dict[str, Any]]:
             yield {"raw": payload}
 
 
-def sse_json_stream(items) -> Iterator[str]:
+def sse_json_stream(items, cleanup: Callable[[], None] | None = None) -> Iterator[str]:
+    cleaned = False
+
+    def run_cleanup() -> None:
+        nonlocal cleaned
+        if cleaned or cleanup is None:
+            return
+        cleaned = True
+        cleanup()
+
     yield ": stream-open\n\n"
     try:
-        for item in items:
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-    except Exception as exc:
-        logger.warning({
-            "event": "sse_stream_error",
-            "error_type": exc.__class__.__name__,
-            "error": str(exc),
-        })
-        yield f"data: {json.dumps({'error': {'message': str(exc), 'type': exc.__class__.__name__}}, ensure_ascii=False)}\n\n"
-    yield "data: [DONE]\n\n"
+        try:
+            for item in items:
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            logger.warning({
+                "event": "sse_stream_error",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            })
+            yield f"data: {json.dumps({'error': {'message': str(exc), 'type': exc.__class__.__name__}}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+        run_cleanup()
+    finally:
+        run_cleanup()
+        close = getattr(items, "close", None)
+        if callable(close):
+            close()
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:

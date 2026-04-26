@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from fastapi import HTTPException
 
@@ -105,6 +105,29 @@ class ChatGPTService:
     def _get_text_access_token(self) -> str:
         tokens = self.account_service.list_tokens()
         return tokens[0] if tokens else ""
+
+    @staticmethod
+    def _empty_cleanup() -> None:
+        return
+
+    @staticmethod
+    def _backend_cleanup(backend: OpenAIBackendAPI, log_prefix: str) -> Callable[[], None]:
+        return lambda: backend.cleanup_stream_conversation(log_prefix)
+
+    def _text_chat_stream_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
+        model = str(body.get("model") or "auto").strip() or "auto"
+        messages = self._chat_messages_from_body(body)
+        backend = self._new_backend(self._get_text_access_token())
+        stream = backend.chat_completions(messages=messages, model=model, stream=True)
+        return stream, self._backend_cleanup(backend, "chat-stream")
+
+    def _text_response_stream_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
+        model = str(body.get("model") or "auto").strip() or "auto"
+        messages = self._response_messages_from_input(body.get("input"), body.get("instructions"))
+        if len(messages) == 1 and messages[0].get("role") == "system":
+            raise HTTPException(status_code=400, detail={"error": "input text is required"})
+        backend = self._new_backend(self._get_text_access_token())
+        return self._stream_text_response(body, backend=backend, messages=messages), self._backend_cleanup(backend, "chat-stream")
 
     @staticmethod
     def _encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -222,10 +245,16 @@ class ChatGPTService:
             "usage": result.get("usage"),
         }
 
-    def _stream_text_response(self, body: dict[str, object]) -> Iterator[dict[str, object]]:
+    def _stream_text_response(
+        self,
+        body: dict[str, object],
+        *,
+        backend: OpenAIBackendAPI | None = None,
+        messages: list[dict[str, object]] | None = None,
+    ) -> Iterator[dict[str, object]]:
         model = str(body.get("model") or "auto").strip() or "auto"
-        messages = self._response_messages_from_input(body.get("input"), body.get("instructions"))
-        if len(messages) == 1 and messages[0].get("role") == "system":
+        effective_messages = messages or self._response_messages_from_input(body.get("input"), body.get("instructions"))
+        if len(effective_messages) == 1 and effective_messages[0].get("role") == "system":
             raise HTTPException(status_code=400, detail={"error": "input text is required"})
 
         response_id = f"resp_{uuid.uuid4().hex}"
@@ -254,7 +283,8 @@ class ChatGPTService:
         }
 
         try:
-            stream = self._new_backend(self._get_text_access_token()).chat_completions(messages=messages, model=model, stream=True)
+            stream_backend = backend or self._new_backend(self._get_text_access_token())
+            stream = stream_backend.chat_completions(messages=effective_messages, model=model, stream=True)
             for chunk in stream:
                 choices = chunk.get("choices")
                 first_choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
@@ -1078,6 +1108,11 @@ class ChatGPTService:
             return self._create_image_chat_completion(body)
         return self._create_text_chat_completion(body)
 
+    def stream_chat_completion_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
+        if is_image_chat_request(body):
+            return self._stream_image_chat_completion(body), self._empty_cleanup
+        return self._text_chat_stream_with_cleanup(body)
+
     def stream_chat_completion(self, body: dict[str, object]) -> Iterator[dict[str, object]]:
         if is_image_chat_request(body):
             yield from self._stream_image_chat_completion(body)
@@ -1100,6 +1135,11 @@ class ChatGPTService:
 
     def _get_response_access_token(self, body: dict[str, object]) -> str:
         return self.account_service.get_available_access_token()
+
+    def stream_response_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
+        if self._is_text_response_request(body):
+            return self._text_response_stream_with_cleanup(body)
+        return self.stream_response(body), self._empty_cleanup
 
     def stream_response(self, body: dict[str, object]) -> Iterator[dict[str, object]]:
         if self._is_text_response_request(body):
