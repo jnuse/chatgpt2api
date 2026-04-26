@@ -528,11 +528,12 @@ class OpenAIBackendAPI:
         ensure_ok(response, path)
         return response
 
-    def _parse_image_sse(self, response: requests.Response) -> Dict[str, Any]:
+    def _parse_image_sse(self, response: requests.Response, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """从图片 SSE 里提取 conversation_id、file_ids、sediment_ids。"""
-        conversation_id = ""
-        file_ids: list[str] = []
-        sediment_ids: list[str] = []
+        state = state if state is not None else {}
+        conversation_id = str(state.get("conversation_id") or "").strip()
+        file_ids = state.setdefault("file_ids", [])
+        sediment_ids = state.setdefault("sediment_ids", [])
         for raw_line in response.iter_lines():
             if not raw_line:
                 continue
@@ -546,13 +547,15 @@ class OpenAIBackendAPI:
                 match = re.search(r'"conversation_id"\s*:\s*"([^"]+)"', payload)
                 if match:
                     conversation_id = match.group(1)
+                    state["conversation_id"] = conversation_id
             for file_id in re.findall(r"(file[-_][A-Za-z0-9]+)", payload):
                 if file_id not in file_ids:
                     file_ids.append(file_id)
             for sediment_id in re.findall(r"sediment://([A-Za-z0-9_-]+)", payload):
                 if sediment_id not in sediment_ids:
                     sediment_ids.append(sediment_id)
-        return {"conversation_id": conversation_id, "file_ids": file_ids, "sediment_ids": sediment_ids}
+        state["conversation_id"] = conversation_id
+        return {"conversation_id": conversation_id, "file_ids": list(file_ids), "sediment_ids": list(sediment_ids)}
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """获取完整 conversation 详情。"""
@@ -727,6 +730,19 @@ class OpenAIBackendAPI:
                 data.append({"url": self._save_image_bytes(response.content)})
         return {"created": int(time.time()), "data": data}
 
+    def _cleanup_image_remote_session(self, conversation_id: str, log_prefix: str) -> None:
+        normalized_id = str(conversation_id or "").strip()
+        if not normalized_id:
+            return
+        cleanup_remote_session(
+            self.session,
+            self.access_token,
+            self.device_id,
+            normalized_id,
+            enabled=config.auto_delete_remote_session,
+            log_prefix=log_prefix,
+        )
+
     def _run_image_task(self, prompt: str, model: str, size: str | None, images: Optional[list[str]] = None,
                         response_format: str = "url") -> Dict[str, Any]:
         """执行图片生成或图片编辑主流程。"""
@@ -756,58 +772,62 @@ class OpenAIBackendAPI:
         conduit_token = self._prepare_image_conversation(final_prompt, requirements, model)
         logger.debug({"event": "image_conduit_ready", "conduit_token_present": bool(conduit_token)})
         sse = self._start_image_generation(final_prompt, requirements, conduit_token, model, references)
-        sse_result = self._parse_image_sse(sse)
-        logger.debug({"event": "image_sse_result", "sse_result": sse_result})
-        conversation_id = sse_result["conversation_id"]
-        file_ids = list(sse_result["file_ids"])
-        sediment_ids = list(sse_result["sediment_ids"])
-        invalid_file_id_patterns = {"file_upload"}
-        file_ids = [fid for fid in file_ids if fid not in invalid_file_id_patterns]
-        if conversation_id and not file_ids and not sediment_ids:
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id)
-            file_ids.extend([item for item in polled_file_ids if item not in file_ids])
-            sediment_ids.extend([item for item in polled_sediment_ids if item not in sediment_ids])
+        parse_state: Dict[str, Any] = {"conversation_id": "", "file_ids": [], "sediment_ids": []}
+        cleanup_conversation_id = ""
+        try:
+            sse_result = self._parse_image_sse(sse, parse_state)
+            logger.debug({"event": "image_sse_result", "sse_result": sse_result})
+            conversation_id = str(sse_result["conversation_id"] or "").strip()
+            file_ids = list(sse_result["file_ids"])
+            sediment_ids = list(sse_result["sediment_ids"])
+            invalid_file_id_patterns = {"file_upload"}
+            file_ids = [fid for fid in file_ids if fid not in invalid_file_id_patterns]
+            cleanup_conversation_id = conversation_id or str(parse_state.get("conversation_id") or "").strip()
+            if conversation_id and not file_ids and not sediment_ids:
+                polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id)
+                file_ids.extend([item for item in polled_file_ids if item not in file_ids])
+                sediment_ids.extend([item for item in polled_sediment_ids if item not in sediment_ids])
+                logger.debug({
+                    "event": "image_polled_result",
+                    "conversation_id": conversation_id,
+                    "file_ids": polled_file_ids,
+                    "sediment_ids": polled_sediment_ids,
+                })
+                try:
+                    conversation = self._get_conversation(conversation_id)
+                    logger.debug({
+                        "event": "image_conversation_snapshot",
+                        "conversation_id": conversation_id,
+                        "conversation": conversation,
+                    })
+                except Exception as exc:
+                    logger.debug({
+                        "event": "image_conversation_snapshot_failed",
+                        "conversation_id": conversation_id,
+                        "error": repr(exc),
+                    })
             logger.debug({
-                "event": "image_polled_result",
+                "event": "image_resolved_ids",
                 "conversation_id": conversation_id,
-                "file_ids": polled_file_ids,
-                "sediment_ids": polled_sediment_ids,
+                "file_ids": file_ids,
+                "sediment_ids": sediment_ids,
             })
+            urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+            logger.debug({"event": "image_final_urls", "conversation_id": conversation_id, "urls": urls})
+            if not urls:
+                raise RuntimeError(
+                    "no downloadable image result found; "
+                    f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
+                )
+            return self._image_response(urls, response_format)
+        finally:
             try:
-                conversation = self._get_conversation(conversation_id)
-                logger.debug({
-                    "event": "image_conversation_snapshot",
-                    "conversation_id": conversation_id,
-                    "conversation": conversation,
-                })
-            except Exception as exc:
-                logger.debug({
-                    "event": "image_conversation_snapshot_failed",
-                    "conversation_id": conversation_id,
-                    "error": repr(exc),
-                })
-        logger.debug({
-            "event": "image_resolved_ids",
-            "conversation_id": conversation_id,
-            "file_ids": file_ids,
-            "sediment_ids": sediment_ids,
-        })
-        urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
-        logger.debug({"event": "image_final_urls", "conversation_id": conversation_id, "urls": urls})
-        if not urls:
-            raise RuntimeError(
-                "no downloadable image result found; "
-                f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
-            )
-        cleanup_remote_session(
-            self.session,
-            self.access_token,
-            self.device_id,
-            conversation_id,
-            enabled=config.auto_delete_remote_session,
-            log_prefix="image-task",
-        )
-        return self._image_response(urls, response_format)
+                sse.close()
+            finally:
+                self._cleanup_image_remote_session(
+                    cleanup_conversation_id or str(parse_state.get("conversation_id") or "").strip(),
+                    "image-task",
+                )
 
     def _build_codex_response_input(self, prompt: str, images: Optional[list[str]] = None) -> list[Dict[str, Any]]:
         if not images:
@@ -957,6 +977,7 @@ class OpenAIBackendAPI:
         current_text = ""
         sent_role = False
         conversation_id = ""
+        cleanup_conversation_id = ""
         file_ids: list[str] = []
         sediment_ids: list[str] = []
 
@@ -967,38 +988,73 @@ class OpenAIBackendAPI:
         conduit_token = self._prepare_image_conversation(final_prompt, requirements, model)
         sse = self._start_image_generation(final_prompt, requirements, conduit_token, model, references)
         try:
-            for raw_line in sse.iter_lines():
-                if not raw_line:
-                    continue
-                line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if not payload:
-                    continue
-                if payload == "[DONE]":
-                    break
+            try:
+                for raw_line in sse.iter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload:
+                        continue
+                    if payload == "[DONE]":
+                        break
 
-                if not conversation_id:
-                    conversation_id = self._extract_image_stream_conversation_id(payload)
-                new_file_ids, new_sediment_ids = self._extract_image_stream_ids(payload)
-                self._append_unique(file_ids, new_file_ids)
-                self._append_unique(sediment_ids, new_sediment_ids)
+                    if not conversation_id:
+                        conversation_id = self._extract_image_stream_conversation_id(payload)
+                        cleanup_conversation_id = conversation_id or cleanup_conversation_id
+                    new_file_ids, new_sediment_ids = self._extract_image_stream_ids(payload)
+                    self._append_unique(file_ids, new_file_ids)
+                    self._append_unique(sediment_ids, new_sediment_ids)
 
-                try:
-                    event = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
 
-                conversation_id = str(event.get("conversation_id") or conversation_id)
-                value = event.get("v")
-                if isinstance(value, dict):
-                    conversation_id = str(value.get("conversation_id") or conversation_id)
+                    conversation_id = str(event.get("conversation_id") or conversation_id).strip()
+                    value = event.get("v")
+                    if isinstance(value, dict):
+                        conversation_id = str(value.get("conversation_id") or conversation_id).strip()
+                    cleanup_conversation_id = conversation_id or cleanup_conversation_id
 
-                next_text = self._next_image_stream_text(event, current_text)
-                if next_text == current_text:
+                    next_text = self._next_image_stream_text(event, current_text)
+                    if next_text == current_text:
+                        yield {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": None,
+                            }],
+                            "upstream_event": event,
+                        }
+                        continue
+
+                    delta = next_text[len(current_text):] if next_text.startswith(current_text) else next_text
+                    current_text = next_text
+                    if not sent_role:
+                        sent_role = True
+                        yield {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": delta},
+                                "finish_reason": None,
+                            }],
+                            "upstream_event": event,
+                        }
+                        continue
+
                     yield {
                         "id": completion_id,
                         "object": "chat.completion.chunk",
@@ -1006,31 +1062,31 @@ class OpenAIBackendAPI:
                         "model": model,
                         "choices": [{
                             "index": 0,
-                            "delta": {},
+                            "delta": {"content": delta},
                             "finish_reason": None,
                         }],
                         "upstream_event": event,
                     }
-                    continue
+            finally:
+                sse.close()
 
-                delta = next_text[len(current_text):] if next_text.startswith(current_text) else next_text
-                current_text = next_text
-                if not sent_role:
-                    sent_role = True
-                    yield {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"role": "assistant", "content": delta},
-                            "finish_reason": None,
-                        }],
-                        "upstream_event": event,
-                    }
-                    continue
+            invalid_file_id_patterns = {"file_upload"}
+            file_ids = [fid for fid in file_ids if fid not in invalid_file_id_patterns]
+            if conversation_id and not file_ids and not sediment_ids:
+                polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id)
+                self._append_unique(file_ids, polled_file_ids)
+                self._append_unique(sediment_ids, polled_sediment_ids)
 
+            urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+            if not urls:
+                raise RuntimeError(
+                    "no downloadable image result found; "
+                    f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
+                )
+
+            image_content = build_chat_image_markdown_content(self._image_response(urls, "b64_json"))
+            if not sent_role:
+                sent_role = True
                 yield {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -1038,65 +1094,35 @@ class OpenAIBackendAPI:
                     "model": model,
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": delta},
+                        "delta": {"role": "assistant", "content": image_content},
                         "finish_reason": None,
                     }],
-                    "upstream_event": event,
                 }
+            else:
+                yield {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": image_content},
+                        "finish_reason": None,
+                    }],
+                }
+            yield {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }],
+            }
         finally:
-            sse.close()
-
-        invalid_file_id_patterns = {"file_upload"}
-        file_ids = [fid for fid in file_ids if fid not in invalid_file_id_patterns]
-        if conversation_id and not file_ids and not sediment_ids:
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id)
-            self._append_unique(file_ids, polled_file_ids)
-            self._append_unique(sediment_ids, polled_sediment_ids)
-
-        urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
-        if not urls:
-            raise RuntimeError(
-                "no downloadable image result found; "
-                f"conversation_id={conversation_id}, file_ids={file_ids}, sediment_ids={sediment_ids}"
-            )
-
-        image_content = build_chat_image_markdown_content(self._image_response(urls, "b64_json"))
-        if not sent_role:
-            sent_role = True
-            yield {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": image_content},
-                    "finish_reason": None,
-                }],
-            }
-        else:
-            yield {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": image_content},
-                    "finish_reason": None,
-                }],
-            }
-        yield {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
-            }],
-        }
+            self._cleanup_image_remote_session(cleanup_conversation_id, "image-stream")
 
     def _apply_text_patch(self, event: Dict[str, Any], current_text: str, history_text: str = "") -> str:
         """从 patch 事件里恢复最新文本。"""
