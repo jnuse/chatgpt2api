@@ -746,7 +746,7 @@ class OpenAIBackendAPI:
 
     def _remember_stream_cleanup_conversation(self, conversation_id: str) -> None:
         normalized_id = str(conversation_id or "").strip()
-        if self.access_token and normalized_id:
+        if self.access_token and normalized_id and not self._stream_cleanup_conversation_id:
             self._stream_cleanup_conversation_id = normalized_id
 
     def consume_stream_cleanup_conversation_id(self) -> str:
@@ -969,18 +969,6 @@ class OpenAIBackendAPI:
         value = event.get("v")
         if isinstance(value, dict):
             conversation_id = str(value.get("conversation_id") or "").strip()
-            if conversation_id:
-                return conversation_id
-            message = value.get("message")
-            if isinstance(message, dict):
-                metadata = message.get("metadata") or {}
-                conversation_id = str(metadata.get("conversation_id") or "").strip()
-                if conversation_id:
-                    return conversation_id
-        message = event.get("message")
-        if isinstance(message, dict):
-            metadata = message.get("metadata") or {}
-            conversation_id = str(metadata.get("conversation_id") or "").strip()
             if conversation_id:
                 return conversation_id
         raw_payload = str(event.get("raw") or "").strip()
@@ -1398,7 +1386,8 @@ class OpenAIBackendAPI:
         try:
             for event in self._stream_events(path, requirements, self._conversation_payload(messages, model, timezone)):
                 events.append(event)
-                cleanup_conversation_id = self._event_conversation_id(event) or cleanup_conversation_id
+                if not cleanup_conversation_id:
+                    cleanup_conversation_id = self._event_conversation_id(event)
             return {
                 "requirements": requirements,
                 "prepare": {},
