@@ -99,7 +99,6 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
-        self._stream_cleanup_conversation_id = ""
 
     def _build_fp(self) -> Dict[str, str]:
         account = account_service.get_account(self.access_token) if self.access_token else {}
@@ -744,19 +743,6 @@ class OpenAIBackendAPI:
             log_prefix=log_prefix,
         )
 
-    def _remember_stream_cleanup_conversation(self, conversation_id: str) -> None:
-        normalized_id = str(conversation_id or "").strip()
-        if self.access_token and normalized_id and not self._stream_cleanup_conversation_id:
-            self._stream_cleanup_conversation_id = normalized_id
-
-    def consume_stream_cleanup_conversation_id(self) -> str:
-        conversation_id = self._stream_cleanup_conversation_id
-        self._stream_cleanup_conversation_id = ""
-        return conversation_id
-
-    def cleanup_stream_conversation(self, log_prefix: str) -> None:
-        self._cleanup_remote_conversation(self.consume_stream_cleanup_conversation_id(), log_prefix)
-
     def _run_image_task(self, prompt: str, model: str, size: str | None, images: Optional[list[str]] = None,
                         response_format: str = "url") -> Dict[str, Any]:
         """执行图片生成或图片编辑主流程。"""
@@ -962,26 +948,25 @@ class OpenAIBackendAPI:
         return match.group(1) if match else ""
 
     @staticmethod
-    def _event_conversation_id(event: Dict[str, Any]) -> str:
+    def _event_conversation_id(event: Dict[str, Any]) -> tuple[str, str]:
         conversation_id = str(event.get("conversation_id") or "").strip()
         if conversation_id:
-            return conversation_id
+            return conversation_id, "event.conversation_id"
         value = event.get("v")
         if isinstance(value, dict):
             conversation_id = str(value.get("conversation_id") or "").strip()
             if conversation_id:
-                return conversation_id
+                return conversation_id, "event.v.conversation_id"
         raw_payload = str(event.get("raw") or "").strip()
         if raw_payload:
-            return OpenAIBackendAPI._extract_stream_conversation_id(raw_payload)
-        return ""
-
-    def _events_conversation_id(self, events: list[Dict[str, Any]]) -> str:
-        for event in reversed(events):
-            conversation_id = self._event_conversation_id(event)
+            conversation_id = OpenAIBackendAPI._extract_stream_conversation_id(raw_payload)
             if conversation_id:
-                return conversation_id
-        return ""
+                return conversation_id, "event.raw"
+        return "", ""
+
+    def _event_conversation_id_value(self, event: Dict[str, Any]) -> str:
+        conversation_id, _ = self._event_conversation_id(event)
+        return conversation_id
 
     def _next_image_stream_text(self, event: Dict[str, Any], current_text: str) -> str:
         for candidate in (event, event.get("v")):
@@ -1383,11 +1368,12 @@ class OpenAIBackendAPI:
         events: list[Dict[str, Any]] = []
         cleanup_conversation_id = ""
         history_assistant_text = self._assistant_history_text(messages)
+        payload = self._conversation_payload(messages, model, timezone)
         try:
-            for event in self._stream_events(path, requirements, self._conversation_payload(messages, model, timezone)):
+            for event in self._stream_events(path, requirements, payload):
                 events.append(event)
                 if not cleanup_conversation_id:
-                    cleanup_conversation_id = self._event_conversation_id(event)
+                    cleanup_conversation_id = self._event_conversation_id_value(event)
             return {
                 "requirements": requirements,
                 "prepare": {},
@@ -1452,14 +1438,12 @@ class OpenAIBackendAPI:
         history_assistant_index = 0
         current_text = ""
         sent_role = False
-        self._stream_cleanup_conversation_id = ""
         self._bootstrap()
         requirements = self._get_chat_requirements(authenticated=bool(self.access_token))
         path, timezone = self._chat_target()
         payload = self._conversation_payload(messages, model, timezone)
 
         for event in self._stream_events(path, requirements, payload):
-            self._remember_stream_cleanup_conversation(self._event_conversation_id(event))
             if event.get("done"):
                 break
             event_assistant_text = self._event_assistant_text(event, history_assistant_text)

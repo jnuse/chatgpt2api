@@ -110,16 +110,12 @@ class ChatGPTService:
     def _empty_cleanup() -> None:
         return
 
-    @staticmethod
-    def _backend_cleanup(backend: OpenAIBackendAPI, log_prefix: str) -> Callable[[], None]:
-        return lambda: backend.cleanup_stream_conversation(log_prefix)
-
     def _text_chat_stream_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
         model = str(body.get("model") or "auto").strip() or "auto"
         messages = self._chat_messages_from_body(body)
         backend = self._new_backend(self._get_text_access_token())
         stream = backend.chat_completions(messages=messages, model=model, stream=True)
-        return stream, self._backend_cleanup(backend, "chat-stream")
+        return stream, self._empty_cleanup
 
     def _text_response_stream_with_cleanup(self, body: dict[str, object]) -> tuple[Iterator[dict[str, object]], Callable[[], None]]:
         model = str(body.get("model") or "auto").strip() or "auto"
@@ -127,7 +123,7 @@ class ChatGPTService:
         if len(messages) == 1 and messages[0].get("role") == "system":
             raise HTTPException(status_code=400, detail={"error": "input text is required"})
         backend = self._new_backend(self._get_text_access_token())
-        return self._stream_text_response(body, backend=backend, messages=messages), self._backend_cleanup(backend, "chat-stream")
+        return self._stream_text_response(body, backend=backend, messages=messages), self._empty_cleanup
 
     @staticmethod
     def _encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
