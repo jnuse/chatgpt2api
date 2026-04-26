@@ -730,9 +730,9 @@ class OpenAIBackendAPI:
                 data.append({"url": self._save_image_bytes(response.content)})
         return {"created": int(time.time()), "data": data}
 
-    def _cleanup_image_remote_session(self, conversation_id: str, log_prefix: str) -> None:
+    def _cleanup_remote_conversation(self, conversation_id: str, log_prefix: str) -> None:
         normalized_id = str(conversation_id or "").strip()
-        if not normalized_id:
+        if not self.access_token or not normalized_id:
             return
         cleanup_remote_session(
             self.session,
@@ -824,7 +824,7 @@ class OpenAIBackendAPI:
             try:
                 sse.close()
             finally:
-                self._cleanup_image_remote_session(
+                self._cleanup_remote_conversation(
                     cleanup_conversation_id or str(parse_state.get("conversation_id") or "").strip(),
                     "image-task",
                 )
@@ -943,9 +943,43 @@ class OpenAIBackendAPI:
         return file_ids, sediment_ids
 
     @staticmethod
-    def _extract_image_stream_conversation_id(payload: str) -> str:
+    def _extract_stream_conversation_id(payload: str) -> str:
         match = re.search(r'"conversation_id"\s*:\s*"([^"]+)"', payload)
         return match.group(1) if match else ""
+
+    @staticmethod
+    def _event_conversation_id(event: Dict[str, Any]) -> str:
+        conversation_id = str(event.get("conversation_id") or "").strip()
+        if conversation_id:
+            return conversation_id
+        value = event.get("v")
+        if isinstance(value, dict):
+            conversation_id = str(value.get("conversation_id") or "").strip()
+            if conversation_id:
+                return conversation_id
+            message = value.get("message")
+            if isinstance(message, dict):
+                metadata = message.get("metadata") or {}
+                conversation_id = str(metadata.get("conversation_id") or "").strip()
+                if conversation_id:
+                    return conversation_id
+        message = event.get("message")
+        if isinstance(message, dict):
+            metadata = message.get("metadata") or {}
+            conversation_id = str(metadata.get("conversation_id") or "").strip()
+            if conversation_id:
+                return conversation_id
+        raw_payload = str(event.get("raw") or "").strip()
+        if raw_payload:
+            return OpenAIBackendAPI._extract_stream_conversation_id(raw_payload)
+        return ""
+
+    def _events_conversation_id(self, events: list[Dict[str, Any]]) -> str:
+        for event in reversed(events):
+            conversation_id = self._event_conversation_id(event)
+            if conversation_id:
+                return conversation_id
+        return ""
 
     def _next_image_stream_text(self, event: Dict[str, Any], current_text: str) -> str:
         for candidate in (event, event.get("v")):
@@ -1002,7 +1036,7 @@ class OpenAIBackendAPI:
                         break
 
                     if not conversation_id:
-                        conversation_id = self._extract_image_stream_conversation_id(payload)
+                        conversation_id = self._extract_stream_conversation_id(payload)
                         cleanup_conversation_id = conversation_id or cleanup_conversation_id
                     new_file_ids, new_sediment_ids = self._extract_image_stream_ids(payload)
                     self._append_unique(file_ids, new_file_ids)
@@ -1122,7 +1156,7 @@ class OpenAIBackendAPI:
                 }],
             }
         finally:
-            self._cleanup_image_remote_session(cleanup_conversation_id, "image-stream")
+            self._cleanup_remote_conversation(cleanup_conversation_id, "image-stream")
 
     def _apply_text_patch(self, event: Dict[str, Any], current_text: str, history_text: str = "") -> str:
         """从 patch 事件里恢复最新文本。"""
@@ -1344,15 +1378,22 @@ class OpenAIBackendAPI:
         self._bootstrap()
         requirements = self._get_chat_requirements(authenticated=bool(self.access_token))
         path, timezone = self._chat_target()
-        events = list(self._stream_events(path, requirements, self._conversation_payload(messages, model, timezone)))
+        events: list[Dict[str, Any]] = []
+        cleanup_conversation_id = ""
         history_assistant_text = self._assistant_history_text(messages)
-        return {
-            "requirements": requirements,
-            "prepare": {},
-            "events": events,
-            "last_event": self._last_event(events),
-            "text": self._strip_history_prefix(self._extract_text_from_events(events), history_assistant_text),
-        }
+        try:
+            for event in self._stream_events(path, requirements, self._conversation_payload(messages, model, timezone)):
+                events.append(event)
+                cleanup_conversation_id = self._event_conversation_id(event) or cleanup_conversation_id
+            return {
+                "requirements": requirements,
+                "prepare": {},
+                "events": events,
+                "last_event": self._last_event(events),
+                "text": self._strip_history_prefix(self._extract_text_from_events(events), history_assistant_text),
+            }
+        finally:
+            self._cleanup_remote_conversation(cleanup_conversation_id, "chat")
 
     def list_models(self) -> Dict[str, Any]:
         """返回当前模式下可用模型，格式对齐 OpenAI `/v1/models`。"""
@@ -1408,30 +1449,45 @@ class OpenAIBackendAPI:
         history_assistant_index = 0
         current_text = ""
         sent_role = False
+        cleanup_conversation_id = ""
         self._bootstrap()
         requirements = self._get_chat_requirements(authenticated=bool(self.access_token))
         path, timezone = self._chat_target()
         payload = self._conversation_payload(messages, model, timezone)
 
-        for event in self._stream_events(path, requirements, payload):
-            if event.get("done"):
-                break
-            event_assistant_text = self._event_assistant_text(event, history_assistant_text)
-            if (
-                history_assistant_index < len(history_assistant_messages)
-                and event_assistant_text
-                and event_assistant_text == history_assistant_messages[history_assistant_index]
-            ):
-                history_assistant_index += 1
-                current_text = ""
-                continue
-            next_text = self._next_assistant_text(event, current_text, history_assistant_text)
-            if next_text == current_text:
-                continue
-            delta = next_text[len(current_text):] if next_text.startswith(current_text) else next_text
-            current_text = next_text
-            if not sent_role:
-                sent_role = True
+        try:
+            for event in self._stream_events(path, requirements, payload):
+                cleanup_conversation_id = self._event_conversation_id(event) or cleanup_conversation_id
+                if event.get("done"):
+                    break
+                event_assistant_text = self._event_assistant_text(event, history_assistant_text)
+                if (
+                    history_assistant_index < len(history_assistant_messages)
+                    and event_assistant_text
+                    and event_assistant_text == history_assistant_messages[history_assistant_index]
+                ):
+                    history_assistant_index += 1
+                    current_text = ""
+                    continue
+                next_text = self._next_assistant_text(event, current_text, history_assistant_text)
+                if next_text == current_text:
+                    continue
+                delta = next_text[len(current_text):] if next_text.startswith(current_text) else next_text
+                current_text = next_text
+                if not sent_role:
+                    sent_role = True
+                    yield {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": delta},
+                            "finish_reason": None,
+                        }],
+                    }
+                    continue
                 yield {
                     "id": completion_id,
                     "object": "chat.completion.chunk",
@@ -1439,24 +1495,23 @@ class OpenAIBackendAPI:
                     "model": model,
                     "choices": [{
                         "index": 0,
-                        "delta": {"role": "assistant", "content": delta},
+                        "delta": {"content": delta},
                         "finish_reason": None,
                     }],
                 }
-                continue
-            yield {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": delta},
-                    "finish_reason": None,
-                }],
-            }
 
-        if not sent_role:
+            if not sent_role:
+                yield {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }],
+                }
             yield {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1464,21 +1519,13 @@ class OpenAIBackendAPI:
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
-                    "finish_reason": None,
+                    "delta": {},
+                    "finish_reason": "stop",
                 }],
             }
-        yield {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop",
-            }],
-        }
+        finally:
+            self._cleanup_remote_conversation(cleanup_conversation_id, "chat-stream")
+
 
     def _anthropic_message_response(self, model: str, messages: list[Dict[str, Any]], text: str) -> Dict[str, Any]:
         """把对话结果整理成 Anthropic `/v1/messages` 风格结构。"""
