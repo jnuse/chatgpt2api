@@ -12,9 +12,21 @@ web_dist
 data
 config.json
 edit
-test
 
 docker-compose-local.yml
 
 .claude/settings.local.json
 CLAUDE.MD
+cmd.txt
+
+# Environment variables
+.env
+.env.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Git cache
+git_cache/

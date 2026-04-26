@@ -5,7 +5,7 @@ from fastapi import HTTPException
 
 from services.account_service import AccountService
 from services.proxy_service import proxy_settings
-from services.utils import anonymize_token
+from utils.helper import anonymize_token
 
 
 def extract_remote_error_message(response) -> str:

@@ -3,6 +3,7 @@ import { httpRequest } from "@/lib/request";
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "auto" | "gpt-image-1" | "gpt-image-2";
+export type AuthRole = "admin" | "user";
 
 export type Account = {
   id: string;
@@ -52,15 +53,31 @@ type AccountUpdateResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
-  "auth-key"?: string;
   refresh_account_interval_minute?: number | string;
   auto_delete_remote_session?: boolean;
   [key: string]: unknown;
 };
 
+export type LoginResponse = {
+  ok: boolean;
+  version: string;
+  role: AuthRole;
+  subject_id: string;
+  name: string;
+};
+
+export type UserKey = {
+  id: string;
+  name: string;
+  role: "user";
+  enabled: boolean;
+  created_at: string | null;
+  last_used_at: string | null;
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
-  return httpRequest<{ ok: boolean }>("/auth/login", {
+  return httpRequest<LoginResponse>("/auth/login", {
     method: "POST",
     body: {},
     headers: {
@@ -153,7 +170,7 @@ export async function deleteAccountSession(accountId: string, sessionId: string)
   );
 }
 
-export async function generateImage(prompt: string, model?: ImageModel) {
+export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
   return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
     "/v1/images/generations",
     {
@@ -161,6 +178,7 @@ export async function generateImage(prompt: string, model?: ImageModel) {
       body: {
         prompt,
         ...(model ? { model } : {}),
+        ...(size ? { size } : {}),
         n: 1,
         response_format: "b64_json",
       },
@@ -168,7 +186,7 @@ export async function generateImage(prompt: string, model?: ImageModel) {
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel) {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -178,6 +196,9 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   formData.append("prompt", prompt);
   if (model) {
     formData.append("model", model);
+  }
+  if (size) {
+    formData.append("size", size);
   }
   formData.append("n", "1");
 
@@ -198,6 +219,30 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
     body: settings,
+  });
+}
+
+export async function fetchUserKeys() {
+  return httpRequest<{ items: UserKey[] }>("/api/auth/users");
+}
+
+export async function createUserKey(name: string) {
+  return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
+    method: "POST",
+    body: { name },
+  });
+}
+
+export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string }) {
+  return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
+    method: "POST",
+    body: updates,
+  });
+}
+
+export async function deleteUserKey(keyId: string) {
+  return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
+    method: "DELETE",
   });
 }
 

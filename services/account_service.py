@@ -13,7 +13,8 @@ from curl_cffi.requests import Session
 
 from services.config import config
 from services.proxy_service import proxy_settings
-from services.utils import anonymize_token
+from services.storage.base import StorageBackend
+from utils.helper import anonymize_token
 
 
 class AccountService:
@@ -29,8 +30,8 @@ class AccountService:
         "enterprise": "Team",
     }
 
-    def __init__(self, store_file: Path):
-        self.store_file = store_file
+    def __init__(self, storage_backend: StorageBackend):
+        self.storage = storage_backend
         self._lock = Lock()
         self._index = 0
         self._accounts = self._load_accounts()
@@ -86,13 +87,13 @@ class AccountService:
         if isinstance(value, dict):
             for key, item in value.items():
                 key_text = self._clean_token(key).lower()
-                matched = self._normalize_account_type(item)
-                if matched and any(flag in key_text for flag in ("plan", "type", "subscription", "workspace", "tier")):
-                    return matched
-            for item in value.values():
-                matched = self._search_account_type(item)
-                if matched:
-                    return matched
+                if any(flag in key_text for flag in ("plan", "type", "subscription", "workspace", "tier")):
+                    matched = self._normalize_account_type(item)
+                    if matched:
+                        return matched
+                    matched = self._search_account_type(item)
+                    if matched:
+                        return matched
             return None
         if isinstance(value, list):
             for item in value:
@@ -100,7 +101,7 @@ class AccountService:
                 if matched:
                     return matched
             return None
-        return self._normalize_account_type(value)
+        return None
 
     def _detect_account_type(self, access_token: str, me_payload: Any, init_payload: Any) -> str:
         token_payload = self._decode_access_token_payload(access_token)
@@ -157,22 +158,11 @@ class AccountService:
         return quota, restore_at, True
 
     def _load_accounts(self) -> list[dict]:
-        if not self.store_file.exists():
-            return []
-        try:
-            data = json.loads(self.store_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(data, list):
-            return []
-        return [normalized for item in data if (normalized := self._normalize_account(item)) is not None]
+        accounts = self.storage.load_accounts()
+        return [normalized for item in accounts if (normalized := self._normalize_account(item)) is not None]
 
     def _save_accounts(self) -> None:
-        self.store_file.parent.mkdir(parents=True, exist_ok=True)
-        self.store_file.write_text(
-            json.dumps(self._accounts, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        self.storage.save_accounts(self._accounts)
 
     def _build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
         account = self.get_account(access_token) or {}
@@ -248,7 +238,7 @@ class AccountService:
         with self._lock:
             tokens = self._list_available_candidate_tokens(excluded_tokens)
             if not tokens:
-                raise RuntimeError(f"No available tokens found in {self.store_file}")
+                raise RuntimeError("no available image quota")
             access_token = tokens[self._index % len(tokens)]
             self._index += 1
             return access_token
@@ -288,6 +278,10 @@ class AccountService:
 
     def next_token(self) -> str:
         return self.get_available_access_token()
+
+    def has_available_account(self) -> bool:
+        with self._lock:
+            return any(self._is_image_account_available(item) for item in self._accounts)
 
     def get_account(self, access_token: str) -> dict | None:
         access_token = self._clean_token(access_token)
@@ -522,4 +516,4 @@ class AccountService:
         }
 
 
-account_service = AccountService(config.accounts_file)
+account_service = AccountService(config.get_storage_backend())
